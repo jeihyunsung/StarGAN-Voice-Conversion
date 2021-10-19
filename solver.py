@@ -13,7 +13,7 @@ from data_loader import to_categorical
 import librosa
 from utils import *
 from tqdm import tqdm
-
+import soundfile as sf
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
@@ -49,6 +49,7 @@ class Solver(object):
         # Miscellaneous.
         self.use_tensorboard = config.use_tensorboard
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print("device : ", self.device, "cuda : ", torch.cuda.is_available())
 
         # Directories.
         self.log_dir = config.log_dir
@@ -307,13 +308,15 @@ class Solver(object):
                         # decoded_sp_converted = world_decode_spectral_envelop(coded_sp = coded_sp_converted, fs = sampling_rate)
                         wav_transformed = world_speech_synthesis(f0=f0_converted, coded_sp=coded_sp_converted, 
                                                                 ap=ap, fs=sampling_rate, frame_period=frame_period)
-                        
-                        librosa.output.write_wav(
-                            join(self.sample_dir, str(i+1)+'-'+wav_name.split('.')[0]+'-vcto-{}'.format(self.test_loader.trg_spk)+'.wav'), wav_transformed, sampling_rate)
+
+                        sf.write(join(self.sample_dir, str(i+1)+'-'+wav_name.split('.')[0]+'-vcto-{}'.format(self.test_loader.trg_spk)+'.wav'), wav_transformed, sampling_rate)
+                        # librosa.output.write_wav(
+                        #     join(self.sample_dir, str(i+1)+'-'+wav_name.split('.')[0]+'-vcto-{}'.format(self.test_loader.trg_spk)+'.wav'), wav_transformed, sampling_rate)
                         if cpsyn_flag:
                             wav_cpsyn = world_speech_synthesis(f0=f0, coded_sp=coded_sp, 
                                                         ap=ap, fs=sampling_rate, frame_period=frame_period)
-                            librosa.output.write_wav(join(self.sample_dir, 'cpsyn-'+wav_name), wav_cpsyn, sampling_rate)
+                            sf.write(join(self.sample_dir, 'cpsyn-'+wav_name), wav_cpsyn, sampling_rate)
+                            # librosa.output.write_wav(join(self.sample_dir, 'cpsyn-'+wav_name), wav_cpsyn, sampling_rate)
                     cpsyn_flag = False
 
             # Save model checkpoints.
