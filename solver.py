@@ -1,5 +1,7 @@
 from model import Generator
 from model import Discriminator
+from model import StyleEncoder
+from model import MappingNetwork
 from torch.autograd import Variable
 from torchvision.utils import save_image
 import torch
@@ -30,6 +32,8 @@ class Solver(object):
         self.num_speakers = config.num_speakers
         self.lambda_cls = config.lambda_cls
         self.lambda_rec = config.lambda_rec
+        self.lambda_div = config.lambda_div
+        self.lambda_sty = config.lambda_sty
         self.lambda_gp = config.lambda_gp
 
         # Training configurations.
@@ -62,6 +66,9 @@ class Solver(object):
         self.model_save_step = config.model_save_step
         self.lr_update_step = config.lr_update_step
 
+        self.latent_dim = config.latent_dim
+        self.style_dim = config.style_dim
+
         # Build the model and tensorboard.
         self.build_model()
         if self.use_tensorboard:
@@ -71,14 +78,23 @@ class Solver(object):
         """Create a generator and a discriminator."""
         self.G = Generator(num_speakers=self.num_speakers)
         self.D = Discriminator(num_speakers=self.num_speakers)
+        self.E = StyleEncoder(num_speakers=self.num_speakers)
+        self.M = MappingNetwork(num_speakers=self.num_speakers)
 
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
+        self.e_optimizer = torch.optim.Adam(self.E.parameters(), self.d_lr, [self.beta1, self.beta2]) # TODO - lr change
+        self.m_optimizer = torch.optim.Adam(self.M.parameters(), self.d_lr, [self.beta1, self.beta2]) # TODO - lr change
+
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
-            
+        self.print_network(self.E, 'E')
+        self.print_network(self.M, 'M')
+
         self.G.to(self.device)
         self.D.to(self.device)
+        self.E.to(self.device)
+        self.M.to(self.device)
 
     def print_network(self, model, name):
         """Print out the network information."""
@@ -94,8 +110,13 @@ class Solver(object):
         print('Loading the trained models from step {}...'.format(resume_iters))
         G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(resume_iters))
         D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(resume_iters))
+        E_path = os.path.join(self.model_save_dir, '{}-E.ckpt'.format(resume_iters))
+        M_path = os.path.join(self.model_save_dir, '{}-M.ckpt'.format(resume_iters))
+
         self.G.load_state_dict(torch.load(G_path, map_location=lambda storage, loc: storage))
         self.D.load_state_dict(torch.load(D_path, map_location=lambda storage, loc: storage))
+        self.E.load_state_dict(torch.load(E_path, map_location=lambda storage, loc: storage))
+        self.M.load_state_dict(torch.load(M_path, map_location=lambda storage, loc: storage))
 
     def build_tensorboard(self):
         """Build a tensorboard logger."""
@@ -113,6 +134,8 @@ class Solver(object):
         """Reset the gradient buffers."""
         self.g_optimizer.zero_grad()
         self.d_optimizer.zero_grad()
+        self.e_optimizer.zero_grad()
+        self.m_optimizer.zero_grad()
 
     def denorm(self, x):
         """Convert the range from [-1, 1] to [0, 1]."""
@@ -190,22 +213,35 @@ class Solver(object):
 
             # Fetch labels.
             try:
-                mc_real, spk_label_org, spk_c_org = next(data_iter)
+                mc_real, mc_real2, spk_label_org, spk_c_org = next(data_iter)
             except:
                 data_iter = iter(train_loader)
-                mc_real, spk_label_org, spk_c_org = next(data_iter)
+                mc_real, mc_real2, spk_label_org, spk_c_org = next(data_iter)
 
-            mc_real.unsqueeze_(1) # (B, D, T) -> (B, 1, D, T) for conv2d
+            mc_real = mc_real.unsqueeze_(1) # (B, D, T) -> (B, 1, D, T) for conv2d
+            mc_real2 = mc_real2.unsqueeze_(1)
 
             # Generate target domain labels randomly.
             # spk_label_trg: int,   spk_c_trg:one-hot representation 
             spk_label_trg, spk_c_trg = self.sample_spk_c(mc_real.size(0)) 
 
             mc_real = mc_real.to(self.device)                         # Input mc.
+            mc_real2 = mc_real2.to(self.device)                         # Input mc2.
             spk_label_org = spk_label_org.to(self.device)             # Original spk labels.
             spk_c_org = spk_c_org.to(self.device)                     # Original spk acc conditioning.
             spk_label_trg = spk_label_trg.to(self.device)             # Target spk labels for classification loss for G.
             spk_c_trg = spk_c_trg.to(self.device)                     # Target spk conditioning.
+
+            z_trg = torch.randn(mc_real.size(0), self.latent_dim)
+            z_trg = z_trg.unsqueeze_(1)
+            z_trg = torch.FloatTensor(z_trg)
+            z_trg = z_trg.to(self.device)
+
+            z_trg2 = torch.randn(mc_real.size(0), self.latent_dim)
+            z_trg2 = z_trg2.unsqueeze_(1)
+            z_trg2 = torch.FloatTensor(z_trg2)
+            z_trg2 = z_trg2.to(self.device)
+
 
             # =================================================================================== #
             #                             2. Train the discriminator                              #
@@ -216,9 +252,13 @@ class Solver(object):
             d_loss_real = - torch.mean(out_src)
             d_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_org)
             
-
             # Compute loss with fake mc feats.
-            mc_fake = self.G(mc_real, spk_c_trg)
+            with torch.no_grad():
+                if (i+1)%2 == 0:
+                    style_vec = self.M(z_trg, spk_label_trg)
+                else:
+                    style_vec = self.E(mc_real, spk_label_trg)
+            mc_fake = self.G(mc_real, style_vec)
             out_src, out_cls_spks = self.D(mc_fake.detach())
             d_loss_fake = torch.mean(out_src)
 
@@ -244,20 +284,42 @@ class Solver(object):
             # =================================================================================== #
             #                               3. Train the generator                                #
             # =================================================================================== #
-            
+            torch.autograd.set_detect_anomaly(True)
             if (i+1) % self.n_critic == 0:
                 # Original-to-target domain.
-                mc_fake = self.G(mc_real, spk_c_trg)
+                if (i+1)%2 == 0:
+                    style_vec_trg = self.M(z_trg, spk_label_trg)
+                else:
+                    style_vec_trg = self.E(mc_real, spk_label_trg)
+
+                mc_fake = self.G(mc_real, style_vec_trg)
                 out_src, out_cls_spks = self.D(mc_fake)
                 g_loss_fake = - torch.mean(out_src)
                 g_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_trg)
 
-                # Target-to-original domain.
-                mc_reconst = self.G(mc_fake, spk_c_org)
+                # Target-to-original domain. (cycle consistency loss)
+                if (i+1)%2 == 0:
+                    style_vec_org = self.M(z_trg, spk_label_org)
+                else:
+                    style_vec_org = self.E(mc_real, spk_label_org)
+
+                mc_reconst = self.G(mc_fake, style_vec_org)
                 g_loss_rec = torch.mean(torch.abs(mc_real - mc_reconst))
 
+                # Style reconstruction loss
+                style_vec_pred = self.E(mc_fake, spk_label_trg)
+                E_loss_sty = torch.mean(torch.abs(style_vec_pred-style_vec_trg))
+
+                # Diversity sensitive loss
+                if (i+1)%2 == 0:
+                    style_vec_div = self.M(z_trg2, spk_label_trg)
+                else:
+                    style_vec_div = self.E(mc_real2, spk_label_trg)
+                mc_fake2 = self.G(mc_real, style_vec_div)
+                E_loss_div = - torch.mean(torch.abs(mc_fake-mc_fake2.detach()))
+
                 # Backward and optimize.
-                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls_spks
+                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls_spks + self.lambda_sty * E_loss_sty + self.lambda_div * E_loss_div
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
@@ -266,7 +328,8 @@ class Solver(object):
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
                 loss['G/loss_cls_spks'] = g_loss_cls_spks.item()
-
+                loss['E/E_loss_sty'] = E_loss_sty.item()
+                loss['E/E_loss_div'] = E_loss_div.item()
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #
             # =================================================================================== #
@@ -323,8 +386,12 @@ class Solver(object):
             if (i+1) % self.model_save_step == 0:
                 G_path = os.path.join(self.model_save_dir, '{}-G.ckpt'.format(i+1))
                 D_path = os.path.join(self.model_save_dir, '{}-D.ckpt'.format(i+1))
+                E_path = os.path.join(self.model_save_dir, '{}-E.ckpt'.format(i+1))
+                M_path = os.path.join(self.model_save_dir, '{}-M.ckpt'.format(i+1))
                 torch.save(self.G.state_dict(), G_path)
                 torch.save(self.D.state_dict(), D_path)
+                torch.save(self.D.state_dict(), E_path)
+                torch.save(self.D.state_dict(), M_path)
                 print('Saved model checkpoints into {}...'.format(self.model_save_dir))
 
             # Decay learning rates.

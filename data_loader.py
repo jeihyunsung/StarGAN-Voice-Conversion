@@ -80,15 +80,22 @@ class MyDataset(data.Dataset):
 
     def __getitem__(self, index):
         filename = self.mc_files[index]
+        next_index = random.randrange(0,self.num_files-1)
+        filename2 = self.mc_files[next_index]
         spk = basename(filename).split('_')[0]
         spk_idx = spk2idx[spk]
         mc = np.load(filename)
         mc = self.sample_seg(mc)
         mc = np.transpose(mc, (1, 0))  # (T, D) -> (D, T), since pytorch need feature having shape
+
+        mc2 = np.load(filename2)
+        mc2 = self.sample_seg(mc2)
+        mc2 = np.transpose(mc2, (1, 0))  # (T, D) -> (D, T), since pytorch need feature having shape
+
         # to one-hot
         spk_cat = np.squeeze(to_categorical([spk_idx], num_classes=len(speakers)))
 
-        return torch.FloatTensor(mc), torch.LongTensor([spk_idx]).squeeze_(), torch.FloatTensor(spk_cat)
+        return torch.FloatTensor(mc), torch.FloatTensor(mc2), torch.LongTensor([spk_idx]).squeeze_(), torch.FloatTensor(spk_cat)
         
 
 class TestDataset(object):

@@ -3,7 +3,21 @@ import argparse
 from solver import Solver
 from data_loader import get_loader, TestDataset
 from torch.backends import cudnn
+from torch import cuda, device
 
+def GPU_info():
+    # GPU 할당 변경하기
+    GPU_NUM = 1 # 원하는 GPU 번호 입력
+    curr_device = device(f'cuda:{GPU_NUM}' if cuda.is_available() else 'cpu')
+    cuda.set_device(curr_device) # change allocation of current GPU
+    print ('Current cuda device ', cuda.current_device()) # check
+
+    # Additional Infos
+    if device.type == 'cuda':
+        print(cuda.get_device_name(GPU_NUM))
+        print('Memory Usage:')
+        print('Allocated:', round(cuda.memory_allocated(GPU_NUM)/1024**3,1), 'GB')
+        print('Cached:   ', round(cuda.memory_cached(GPU_NUM)/1024**3,1), 'GB')
 
 def str2bool(v):
     return v.lower() in ('true')
@@ -11,6 +25,7 @@ def str2bool(v):
 def main(config):
     # For fast training.
     cudnn.benchmark = True
+    GPU_info()
 
     # Create directories if not exist.
     if not os.path.exists(config.log_dir):
@@ -42,6 +57,8 @@ if __name__ == '__main__':
     parser.add_argument('--lambda_cls', type=float, default=10, help='weight for domain classification loss')
     parser.add_argument('--lambda_rec', type=float, default=10, help='weight for reconstruction loss')
     parser.add_argument('--lambda_gp', type=float, default=10, help='weight for gradient penalty')
+    parser.add_argument('--lambda_div', type=float, default=10, help='weight for diversity loss')
+    parser.add_argument('--lambda_sty', type=float, default=10, help='weight for style reconstruction loss')
     parser.add_argument('--sampling_rate', type=int, default=16000, help='sampling rate')
     
     # Training configuration.
@@ -76,6 +93,10 @@ if __name__ == '__main__':
     parser.add_argument('--sample_step', type=int, default=1000)
     parser.add_argument('--model_save_step', type=int, default=1000)
     parser.add_argument('--lr_update_step', type=int, default=1000)
+
+    parser.add_argument('--latent_dim', type=int, default=16)
+    parser.add_argument('--style_dim', type=int, default=64)
+
 
     config = parser.parse_args()
     print(config)
