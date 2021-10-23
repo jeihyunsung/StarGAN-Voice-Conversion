@@ -1,9 +1,9 @@
 import os
 import argparse
-from solver import Solver
 from data_loader import get_loader, TestDataset
 from torch.backends import cudnn
 from torch import cuda, device
+from solver import Solver
 
 def GPU_info():
     # GPU 할당 변경하기

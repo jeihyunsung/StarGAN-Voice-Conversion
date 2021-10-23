@@ -1,3 +1,4 @@
+import sklearn
 from model import Generator
 from model import Discriminator
 from model import StyleEncoder
@@ -12,10 +13,10 @@ from os.path import join, basename, dirname, split
 import time
 import datetime
 from data_loader import to_categorical
-import librosa
-from utils import *
 from tqdm import tqdm
 import soundfile as sf
+import librosa
+from utils import *
 
 class Solver(object):
     """Solver for training and testing StarGAN."""
@@ -284,10 +285,10 @@ class Solver(object):
             # =================================================================================== #
             #                               3. Train the generator                                #
             # =================================================================================== #
-            torch.autograd.set_detect_anomaly(True)
+
             if (i+1) % self.n_critic == 0:
                 # Original-to-target domain.
-                if (i+1)%2 == 0:
+                if ((i+1)//self.n_critic)%2 == 0:
                     style_vec_trg = self.M(z_trg, spk_label_trg)
                 else:
                     style_vec_trg = self.E(mc_real, spk_label_trg)
@@ -298,7 +299,7 @@ class Solver(object):
                 g_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_trg)
 
                 # Target-to-original domain. (cycle consistency loss)
-                if (i+1)%2 == 0:
+                if ((i+1)//self.n_critic)%2 == 0:
                     style_vec_org = self.M(z_trg, spk_label_org)
                 else:
                     style_vec_org = self.E(mc_real, spk_label_org)
@@ -311,7 +312,7 @@ class Solver(object):
                 E_loss_sty = torch.mean(torch.abs(style_vec_pred-style_vec_trg))
 
                 # Diversity sensitive loss
-                if (i+1)%2 == 0:
+                if ((i+1)//self.n_critic)%2 == 0:
                     style_vec_div = self.M(z_trg2, spk_label_trg)
                 else:
                     style_vec_div = self.E(mc_real2, spk_label_trg)
@@ -363,9 +364,12 @@ class Solver(object):
                         
                         coded_sp_norm = (coded_sp - self.test_loader.mcep_mean_src) / self.test_loader.mcep_std_src
                         coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(self.device)
-                        conds = torch.FloatTensor(self.test_loader.spk_c_trg).to(self.device)
-                        # print(conds.size())
-                        coded_sp_converted_norm = self.G(coded_sp_norm_tensor, conds).data.cpu().numpy()
+
+                        z_test = torch.FloatTensor(torch.randn(1, self.latent_dim)).unsqueeze_(1).to(self.device)
+                        in_idx = torch.LongTensor(np.array([self.test_loader.spk_idx],dtype=np.int64)).to(self.device)
+                        out = self.M(z_test, in_idx)
+                        coded_sp_converted_norm = self.G(coded_sp_norm_tensor, out).data.cpu().numpy()
+                        # coded_sp_converted_norm = self.G(coded_sp_norm_tensor, style_vec_test)
                         coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
                         # decoded_sp_converted = world_decode_spectral_envelop(coded_sp = coded_sp_converted, fs = sampling_rate)

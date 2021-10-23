@@ -227,7 +227,7 @@ class StyleEncoder(nn.Module):
 
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    train_loader = get_loader('/hdd_4T/hynsng/mc/train', 16, 'train', num_workers=1)
+    train_loader = get_loader('/hdd_4T/hynsng/mc/train', 1, 'train', num_workers=1)
     data_iter = iter(train_loader)
     G = Generator().to(device)
     D = Discriminator().to(device)
@@ -246,11 +246,12 @@ if __name__ == '__main__':
         z_trg = torch.randn(16, latent_dim)
         z_trg = z_trg.unsqueeze_(1)
         z_trg = z_trg.to(device)
-        print(z_trg.size())
         style_code_lt = M(z_trg, spk_label_org)
 
-        mc_fake = G(mc_real, style_code_lt)
+        mc_real_mod = torch.cat([mc_real, mc_real, mc_real],dim=3)
+        mc_real_mod2 = mc_real_mod[:,:,:,:672]
+        print(mc_real_mod2.size())
+        mc_fake = G(mc_real_mod2, style_code_lt)
         out_src, out_cls_spks = D(mc_fake)
-        print(style_code_lt.size(), style_code_mc.size())
 
 

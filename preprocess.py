@@ -1,4 +1,3 @@
-import librosa
 import numpy as np
 import os, sys
 import argparse
@@ -14,6 +13,7 @@ from sklearn.model_selection import train_test_split
 import glob
 from os.path import join, basename
 import subprocess
+import librosa
 
 def resample(spk, origin_wavpath, target_wavpath):
     wavfiles = [i for i in os.listdir(join(origin_wavpath, spk)) if i.endswith(".wav")]
