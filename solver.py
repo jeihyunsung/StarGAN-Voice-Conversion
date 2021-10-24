@@ -13,6 +13,7 @@ from os.path import join, basename, dirname, split
 import time
 import datetime
 from data_loader import to_categorical
+from data_loader import speakers, spk2idx
 from tqdm import tqdm
 import soundfile as sf
 import librosa
@@ -69,6 +70,10 @@ class Solver(object):
 
         self.latent_dim = config.latent_dim
         self.style_dim = config.style_dim
+
+        # For Test
+        self.test_dir = config.test_dir
+        self.test_save_dir = config.test_save_dir
 
         # Build the model and tensorboard.
         self.build_model()
@@ -227,7 +232,7 @@ class Solver(object):
             spk_label_trg, spk_c_trg = self.sample_spk_c(mc_real.size(0)) 
 
             mc_real = mc_real.to(self.device)                         # Input mc.
-            mc_real2 = mc_real2.to(self.device)                         # Input mc2.
+            mc_real2 = mc_real2.to(self.device)                       # Input mc2.
             spk_label_org = spk_label_org.to(self.device)             # Original spk labels.
             spk_c_org = spk_c_org.to(self.device)                     # Original spk acc conditioning.
             spk_label_trg = spk_label_trg.to(self.device)             # Target spk labels for classification loss for G.
@@ -394,8 +399,8 @@ class Solver(object):
                 M_path = os.path.join(self.model_save_dir, '{}-M.ckpt'.format(i+1))
                 torch.save(self.G.state_dict(), G_path)
                 torch.save(self.D.state_dict(), D_path)
-                torch.save(self.D.state_dict(), E_path)
-                torch.save(self.D.state_dict(), M_path)
+                torch.save(self.E.state_dict(), E_path)
+                torch.save(self.M.state_dict(), M_path)
                 print('Saved model checkpoints into {}...'.format(self.model_save_dir))
 
             # Decay learning rates.
@@ -404,5 +409,76 @@ class Solver(object):
                 d_lr -= (self.d_lr / float(self.num_iters_decay))
                 self.update_lr(g_lr, d_lr)
                 print ('Decayed learning rates, g_lr: {}, d_lr: {}.'.format(g_lr, d_lr))
+
+    def check_final_iter(self):
+        max_iter = max([int(f.split('-')[0]) for f in os.listdir(self.model_save_dir) if os.path.isfile(join(self.model_save_dir, f))])
+        return max_iter
+
+    def get_demo_file_list(self):
+        extension = self.test_dir.split('.')[-1]
+        if extension == 'wav':
+            demo_list = [self.test_dir]
+        else:
+            demo_list = [os.path.join(self.test_dir, f) for f in os.listdir(self.test_dir) if os.path.isfile(os.path.join(self.test_dir, f)) and f.split('.')[-1] == 'wav'] 
+        return demo_list
+
+    def test(self):
+
+        # Test starGAN
+        if self.test_dir:
+            test_wavfiles = self.get_demo_file_list()
+        else:
+            test_wavfiles = self.test_loader.get_batch_test_data(batch_size=1)
+        test_wavs = [self.load_wav(wavfile) for wavfile in test_wavfiles]
+
+        # if not self.test_save_dir:
+        #     self.test_save_dir = './'
+
+        if not self.resume_iters:
+            self.resume_iters = self.check_final_iter()
+
+        print("restore checkpoint at step %d ..."% self.resume_iters)
+        self.restore_model(self.resume_iters)
+            
+        # if (i+1) % self.sample_step == 0:
+        sampling_rate=16000
+        num_mcep=36
+        frame_period=5
+
+        # Determine whether do copysynthesize when first do training-time conversion test.
+        original_flag = True
+
+        # with torch.no_grad():
+        for idx, wav in tqdm(enumerate(test_wavs)):
+            original_flag = True
+            wav_name = basename(test_wavfiles[idx])
+
+            f0, timeaxis, sp, ap = world_decompose(wav=wav, fs=sampling_rate, frame_period=frame_period)
+            f0_converted = pitch_conversion(f0=f0, 
+                mean_log_src=self.test_loader.logf0s_mean_src, std_log_src=self.test_loader.logf0s_std_src, 
+                mean_log_target=self.test_loader.logf0s_mean_trg, std_log_target=self.test_loader.logf0s_std_trg)
+            coded_sp = world_encode_spectral_envelop(sp=sp, fs=sampling_rate, dim=num_mcep)
+            
+            coded_sp_norm = (coded_sp - self.test_loader.mcep_mean_src) / self.test_loader.mcep_std_src
+            coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(self.device)
+
+            for trg_spk in speakers:
+                spk_idx =  spk2idx[trg_spk]
+                z_test = torch.FloatTensor(torch.randn(1, self.latent_dim)).unsqueeze_(1).to(self.device)
+                in_idx = torch.LongTensor(np.array([spk_idx],dtype=np.int64)).to(self.device)
+                out = self.M(z_test, in_idx)
+                coded_sp_converted_norm = self.G(coded_sp_norm_tensor, out).data.cpu().numpy()
+                coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
+                coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
+
+                wav_transformed = world_speech_synthesis(f0=f0_converted, coded_sp=coded_sp_converted, 
+                                                        ap=ap, fs=sampling_rate, frame_period=frame_period)
+
+                sf.write(join(self.test_save_dir, 'fake'+'-'+wav_name.split('.')[0]+'-test-{}'.format(trg_spk)+'.wav'), wav_transformed, sampling_rate)
+                if original_flag:
+                    wav_cpsyn = world_speech_synthesis(f0=f0, coded_sp=coded_sp, 
+                                                ap=ap, fs=sampling_rate, frame_period=frame_period)
+                    sf.write(join(self.test_save_dir, 'original-'+wav_name), wav_cpsyn, sampling_rate)
+                    original_flag = False
 
 

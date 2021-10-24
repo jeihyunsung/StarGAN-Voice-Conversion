@@ -100,7 +100,7 @@ class MyDataset(data.Dataset):
 
 class TestDataset(object):
     """Dataset for testing."""
-    def __init__(self, data_dir, wav_dir, src_spk='p262', trg_spk='p272'):
+    def __init__(self, data_dir, wav_dir, src_spk='p262', trg_spk='p229'):
         self.src_spk = src_spk
         self.trg_spk = trg_spk
         self.mc_files = sorted(glob.glob(join(data_dir, '{}*.npy'.format(self.src_spk))))

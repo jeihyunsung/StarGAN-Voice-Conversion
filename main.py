@@ -7,7 +7,7 @@ from solver import Solver
 
 def GPU_info():
     # GPU 할당 변경하기
-    GPU_NUM = 1 # 원하는 GPU 번호 입력
+    GPU_NUM = 0 # 원하는 GPU 번호 입력
     curr_device = device(f'cuda:{GPU_NUM}' if cuda.is_available() else 'cpu')
     cuda.set_device(curr_device) # change allocation of current GPU
     print ('Current cuda device ', cuda.current_device()) # check
@@ -44,9 +44,8 @@ def main(config):
 
     if config.mode == 'train':    
         solver.train()
-
-    # elif config.mode == 'test':
-    #     solver.test()
+    elif config.mode == 'test':
+        solver.test()
 
 
 if __name__ == '__main__':
@@ -97,6 +96,9 @@ if __name__ == '__main__':
     parser.add_argument('--latent_dim', type=int, default=16)
     parser.add_argument('--style_dim', type=int, default=64)
 
+    # For Test
+    parser.add_argument('--test_dir', type=str, default=None, help='WAV file directory for test')
+    parser.add_argument('--test_save_dir', type=str, default='./', help='WAV file save directory for test')
 
     config = parser.parse_args()
     print(config)
