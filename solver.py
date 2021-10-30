@@ -89,8 +89,8 @@ class Solver(object):
 
         self.g_optimizer = torch.optim.Adam(self.G.parameters(), self.g_lr, [self.beta1, self.beta2])
         self.d_optimizer = torch.optim.Adam(self.D.parameters(), self.d_lr, [self.beta1, self.beta2])
-        self.e_optimizer = torch.optim.Adam(self.E.parameters(), self.d_lr, [self.beta1, self.beta2]) # TODO - lr change
-        self.m_optimizer = torch.optim.Adam(self.M.parameters(), self.d_lr, [self.beta1, self.beta2]) # TODO - lr change
+        self.e_optimizer = torch.optim.Adam(self.E.parameters(), self.g_lr, [self.beta1, self.beta2]) # TODO - lr change
+        self.m_optimizer = torch.optim.Adam(self.M.parameters(), self.g_lr, [self.beta1, self.beta2]) # TODO - lr change
 
         self.print_network(self.G, 'G')
         self.print_network(self.D, 'D')
@@ -178,6 +178,24 @@ class Solver(object):
         """Compute softmax cross entropy loss."""
         return F.cross_entropy(logit, target)
 
+    def adv_loss(self, logits, target):
+        assert target in [1, 0]
+        targets = torch.full_like(logits, fill_value=target)
+        loss = F.binary_cross_entropy_with_logits(logits, targets)
+        return loss
+
+    def r1_reg(self, d_out, x_in):
+        # zero-centered gradient penalty for real images
+        batch_size = x_in.size(0)
+        grad_dout = torch.autograd.grad(
+            outputs=d_out.sum(), inputs=x_in,
+            create_graph=True, retain_graph=True, only_inputs=True
+        )[0]
+        grad_dout2 = grad_dout.pow(2)
+        assert(grad_dout2.size() == x_in.size())
+        reg = 0.5 * grad_dout2.view(batch_size, -1).sum(1).mean(0)
+        return reg
+
     def load_wav(self, wavfile, sr=16000):
         wav, _ = librosa.load(wavfile, sr=sr, mono=True)
         return wav_padding(wav, sr=16000, frame_period=5, multiple = 4)  # TODO
@@ -254,10 +272,11 @@ class Solver(object):
             # =================================================================================== #
 
             # Compute loss with real mc feats.
-            out_src, out_cls_spks = self.D(mc_real)
-            d_loss_real = - torch.mean(out_src)
-            d_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_org)
-            
+            mc_real.requires_grad_()
+            out_src = self.D(mc_real, spk_label_org)
+            d_loss_real = self.adv_loss(out_src, 1)
+            d_loss_gp = self.r1_reg(out_src, mc_real)
+
             # Compute loss with fake mc feats.
             with torch.no_grad():
                 if (i+1)%2 == 0:
@@ -265,17 +284,17 @@ class Solver(object):
                 else:
                     style_vec = self.E(mc_real, spk_label_trg)
             mc_fake = self.G(mc_real, style_vec)
-            out_src, out_cls_spks = self.D(mc_fake.detach())
-            d_loss_fake = torch.mean(out_src)
+            out_src = self.D(mc_fake, spk_label_trg)
+            d_loss_fake = self.adv_loss(out_src, 0)
 
             # Compute loss for gradient penalty.
-            alpha = torch.rand(mc_real.size(0), 1, 1, 1).to(self.device)
-            x_hat = (alpha * mc_real.data + (1 - alpha) * mc_fake.data).requires_grad_(True)
-            out_src, _ = self.D(x_hat)
-            d_loss_gp = self.gradient_penalty(out_src, x_hat)
+            # alpha = torch.rand(mc_real.size(0), 1, 1, 1).to(self.device)
+            # x_hat = (alpha * mc_real.data + (1 - alpha) * mc_fake.data).requires_grad_(True)
+            # out_src = self.D(x_hat, spk_label_trg)
+            # d_loss_gp = self.gradient_penalty(out_src, x_hat)
 
             # Backward and optimize.
-            d_loss = d_loss_real + d_loss_fake + self.lambda_cls * d_loss_cls_spks + self.lambda_gp * d_loss_gp
+            d_loss = d_loss_real + d_loss_fake + self.lambda_gp * d_loss_gp
             self.reset_grad()
             d_loss.backward()
             self.d_optimizer.step()
@@ -284,7 +303,6 @@ class Solver(object):
             loss = {}
             loss['D/loss_real'] = d_loss_real.item()
             loss['D/loss_fake'] = d_loss_fake.item()
-            loss['D/loss_cls_spks'] = d_loss_cls_spks.item()
             loss['D/loss_gp'] = d_loss_gp.item()
             
             # =================================================================================== #
@@ -299,9 +317,8 @@ class Solver(object):
                     style_vec_trg = self.E(mc_real, spk_label_trg)
 
                 mc_fake = self.G(mc_real, style_vec_trg)
-                out_src, out_cls_spks = self.D(mc_fake)
+                out_src = self.D(mc_fake, spk_label_trg)
                 g_loss_fake = - torch.mean(out_src)
-                g_loss_cls_spks = self.classification_loss(out_cls_spks, spk_label_trg)
 
                 # Target-to-original domain. (cycle consistency loss)
                 if ((i+1)//self.n_critic)%2 == 0:
@@ -325,7 +342,7 @@ class Solver(object):
                 E_loss_div = - torch.mean(torch.abs(mc_fake-mc_fake2.detach()))
 
                 # Backward and optimize.
-                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_cls * g_loss_cls_spks + self.lambda_sty * E_loss_sty + self.lambda_div * E_loss_div
+                g_loss = g_loss_fake + self.lambda_rec * g_loss_rec + self.lambda_sty * E_loss_sty + self.lambda_div * E_loss_div
                 self.reset_grad()
                 g_loss.backward()
                 self.g_optimizer.step()
@@ -333,9 +350,12 @@ class Solver(object):
                 # Logging.
                 loss['G/loss_fake'] = g_loss_fake.item()
                 loss['G/loss_rec'] = g_loss_rec.item()
-                loss['G/loss_cls_spks'] = g_loss_cls_spks.item()
-                loss['E/E_loss_sty'] = E_loss_sty.item()
-                loss['E/E_loss_div'] = E_loss_div.item()
+                if ((i+1)//self.n_critic)%2 == 0:
+                    loss['M/M_loss_sty'] = E_loss_sty.item()
+                    loss['M/M_loss_div'] = E_loss_div.item()
+                else:
+                    loss['E/E_loss_sty'] = E_loss_sty.item()
+                    loss['E/E_loss_div'] = E_loss_div.item()
             # =================================================================================== #
             #                                 4. Miscellaneous                                    #
             # =================================================================================== #
@@ -360,7 +380,6 @@ class Solver(object):
                 with torch.no_grad():
                     for idx, wav in tqdm(enumerate(test_wavs)):
                         wav_name = basename(test_wavfiles[idx])
-                        # print(wav_name)
                         f0, timeaxis, sp, ap = world_decompose(wav=wav, fs=sampling_rate, frame_period=frame_period)
                         f0_converted = pitch_conversion(f0=f0, 
                             mean_log_src=self.test_loader.logf0s_mean_src, std_log_src=self.test_loader.logf0s_std_src, 
@@ -374,21 +393,16 @@ class Solver(object):
                         in_idx = torch.LongTensor(np.array([self.test_loader.spk_idx],dtype=np.int64)).to(self.device)
                         out = self.M(z_test, in_idx)
                         coded_sp_converted_norm = self.G(coded_sp_norm_tensor, out).data.cpu().numpy()
-                        # coded_sp_converted_norm = self.G(coded_sp_norm_tensor, style_vec_test)
                         coded_sp_converted = np.squeeze(coded_sp_converted_norm).T * self.test_loader.mcep_std_trg + self.test_loader.mcep_mean_trg
                         coded_sp_converted = np.ascontiguousarray(coded_sp_converted)
-                        # decoded_sp_converted = world_decode_spectral_envelop(coded_sp = coded_sp_converted, fs = sampling_rate)
                         wav_transformed = world_speech_synthesis(f0=f0_converted, coded_sp=coded_sp_converted, 
                                                                 ap=ap, fs=sampling_rate, frame_period=frame_period)
 
                         sf.write(join(self.sample_dir, str(i+1)+'-'+wav_name.split('.')[0]+'-vcto-{}'.format(self.test_loader.trg_spk)+'.wav'), wav_transformed, sampling_rate)
-                        # librosa.output.write_wav(
-                        #     join(self.sample_dir, str(i+1)+'-'+wav_name.split('.')[0]+'-vcto-{}'.format(self.test_loader.trg_spk)+'.wav'), wav_transformed, sampling_rate)
                         if cpsyn_flag:
                             wav_cpsyn = world_speech_synthesis(f0=f0, coded_sp=coded_sp, 
                                                         ap=ap, fs=sampling_rate, frame_period=frame_period)
                             sf.write(join(self.sample_dir, 'cpsyn-'+wav_name), wav_cpsyn, sampling_rate)
-                            # librosa.output.write_wav(join(self.sample_dir, 'cpsyn-'+wav_name), wav_cpsyn, sampling_rate)
                     cpsyn_flag = False
 
             # Save model checkpoints.
@@ -440,7 +454,6 @@ class Solver(object):
         print("restore checkpoint at step %d ..."% self.resume_iters)
         self.restore_model(self.resume_iters)
             
-        # if (i+1) % self.sample_step == 0:
         sampling_rate=16000
         num_mcep=36
         frame_period=5
@@ -448,7 +461,6 @@ class Solver(object):
         # Determine whether do copysynthesize when first do training-time conversion test.
         original_flag = True
 
-        # with torch.no_grad():
         for idx, wav in tqdm(enumerate(test_wavs)):
             original_flag = True
             wav_name = basename(test_wavfiles[idx])
@@ -461,8 +473,8 @@ class Solver(object):
             
             coded_sp_norm = (coded_sp - self.test_loader.mcep_mean_src) / self.test_loader.mcep_std_src
             coded_sp_norm_tensor = torch.FloatTensor(coded_sp_norm.T).unsqueeze_(0).unsqueeze_(1).to(self.device)
-
-            for trg_spk in speakers:
+            speakers_1 = ['p292', 'p293']
+            for trg_spk in speakers_1:
                 spk_idx =  spk2idx[trg_spk]
                 z_test = torch.FloatTensor(torch.randn(1, self.latent_dim)).unsqueeze_(1).to(self.device)
                 in_idx = torch.LongTensor(np.array([spk_idx],dtype=np.int64)).to(self.device)

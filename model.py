@@ -77,26 +77,29 @@ class Discriminator(nn.Module):
     def __init__(self, input_size=(36, 256), conv_dim=64, repeat_num=5, num_speakers=10):
         super(Discriminator, self).__init__()
         layers = []
-        layers.append(nn.Conv2d(1, conv_dim, kernel_size=4, stride=2, padding=1))
+        layers.append(nn.Conv2d(1, conv_dim, kernel_size=3, stride=1, padding=1))
         layers.append(nn.LeakyReLU(0.01))
 
         curr_dim = conv_dim
-        for i in range(1, repeat_num):
+        for i in range(0, repeat_num):
             layers.append(nn.Conv2d(curr_dim, curr_dim*2, kernel_size=4, stride=2, padding=1))
             layers.append(nn.LeakyReLU(0.01))
             curr_dim = curr_dim * 2
 
         kernel_size_0 = int(input_size[0] / np.power(2, repeat_num)) # 1
         kernel_size_1 = int(input_size[1] / np.power(2, repeat_num)) # 8
+
+        layers += [nn.Conv2d(curr_dim, curr_dim, kernel_size=(kernel_size_0, kernel_size_1), stride=1, padding=0, bias=False)]
+        layers += [nn.Conv2d(curr_dim, num_speakers, kernel_size=1, stride=1, padding=0, bias=False)]
+
         self.main = nn.Sequential(*layers)
-        self.conv_dis = nn.Conv2d(curr_dim, 1, kernel_size=(kernel_size_0, kernel_size_1), stride=1, padding=0, bias=False) # padding should be 0
-        self.conv_clf_spks = nn.Conv2d(curr_dim, num_speakers, kernel_size=(kernel_size_0, kernel_size_1), stride=1, padding=0, bias=False)  # for num_speaker
-        
-    def forward(self, x):
-        h = self.main(x)
-        out_src = self.conv_dis(h)
-        out_cls_spks = self.conv_clf_spks(h)
-        return out_src, out_cls_spks.view(out_cls_spks.size(0), out_cls_spks.size(1))
+
+    def forward(self, x, y):
+        out = self.main(x)
+        out = out.view(out.size(0), -1)  # (batch, num_domains)
+        idx = torch.LongTensor(range(y.size(0))).to(y.device)
+        out = out[idx, y]  # (batch)
+        return out
 
 class AdaIN(nn.Module):
     def __init__(self, style_dim, num_features):

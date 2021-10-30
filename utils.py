@@ -1,7 +1,7 @@
+import librosa
 import os
 import numpy as np
 import pyworld
-import librosa
 
 
 def load_wav(wav_file, sr):

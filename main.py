@@ -7,7 +7,7 @@ from solver import Solver
 
 def GPU_info():
     # GPU 할당 변경하기
-    GPU_NUM = 0 # 원하는 GPU 번호 입력
+    GPU_NUM = 1 # 원하는 GPU 번호 입력
     curr_device = device(f'cuda:{GPU_NUM}' if cuda.is_available() else 'cpu')
     cuda.set_device(curr_device) # change allocation of current GPU
     print ('Current cuda device ', cuda.current_device()) # check
